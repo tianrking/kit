@@ -62,6 +62,7 @@ ETCD = 'gcr.io/etcd-development/etcd@sha256:59c69e2004379bb534810ae0ba2dc77226e6
 CONSUL = 'consul@sha256:96be10992ba9106ebabd67e5bee168de0274dbcc242ed05a5e66054528918558'
 ZK = 'zookeeper@sha256:66a1b928d291eb6a482cadcd420a26957f0020dc464ba514421a3cb303340c83'
 containers = ['kit-etcd', 'kit-consul', 'kit-zk', 'kit-eureka']
+quality_failures = []
 
 try:
     proof('00-native-entry')
@@ -152,19 +153,32 @@ try:
             if mode == 'red' and exit_code != 1:
                 raise RuntimeError('Expected actual native RED exit1; assertions need manual evidence audit')
         if mode != 'red':
-            run('full-integration', ['go', 'test', '-count=1', '-v', '-race',
-                                     '-coverprofile=' + str(evidence / 'coverage.coverprofile'),
-                                     '-covermode=atomic', '-tags', 'integration', './...'])
-            run('vet', ['go', 'vet', '-tags', 'integration', './...'])
+            if mode != 'quality':
+                if run('full-integration', ['go', 'test', '-count=1', '-v', '-race',
+                        '-coverprofile=' + str(evidence / 'coverage.coverprofile'),
+                        '-covermode=atomic', '-tags', 'integration', './...'], required=False):
+                    quality_failures.append('full-integration')
+            if run('vet', ['go', 'vet', '-tags', 'integration', './...'], required=False):
+                quality_failures.append('vet')
+            if run('subject-vet', ['go', 'vet', './transport/http/jsonrpc'], required=False):
+                quality_failures.append('subject-vet')
             tracked_go = capture(['git', 'ls-files', '*.go']).splitlines()
             run('gofmt', ['gofmt', '-l', *tracked_go])
             if (evidence / 'gofmt.log').read_text().strip():
-                raise RuntimeError('Project gofmt has nonempty result; preserve baseline/final countercheck')
-            run('git-diff-check', ['git', 'diff', '--check'])
+                quality_failures.append('gofmt-nonempty')
+            subject_go = capture(['git', 'ls-files', 'transport/http/jsonrpc/*.go']).splitlines()
+            run('subject-gofmt', ['gofmt', '-l', *subject_go])
+            if (evidence / 'subject-gofmt.log').read_text().strip():
+                quality_failures.append('subject-gofmt-nonempty')
+            if run('git-diff-check', ['git', 'diff', '--check'], required=False):
+                quality_failures.append('git-diff-check')
     (evidence / 'native-result.json').write_text(json.dumps({'mode': mode, 'source': source,
-        'fourRealServicesReady': True, 'nativeGoSuiteRun': mode != 'environment',
+        'fourRealServicesReady': True, 'nativeGoSuiteRun': mode not in ('environment', 'quality'),
         'defaultEnvironmentSucceeded': default_exit == 0,
-        'disclosedCompatibleEnvironment': environment['compatibilityEnabled']}, indent=2) + '\n')
+        'disclosedCompatibleEnvironment': environment['compatibilityEnabled'],
+        'qualityFailures': quality_failures}, indent=2) + '\n')
+    if quality_failures:
+        raise RuntimeError('Actual native quality failures retained: ' + repr(quality_failures))
 finally:
     for name in containers:
         subprocess.run(['docker', 'logs', name], stdout=(evidence / (name + '-container.log')).open('w'),
