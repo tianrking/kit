@@ -1,0 +1,66 @@
+name: Isolated Kit native proof
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Immutable source commit SHA
+        required: true
+      mode:
+        description: environment, baseline, red, or green
+        required: true
+        default: environment
+      regression:
+        description: Native regression filter for red/green
+        required: false
+        default: ''
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ${{ fromJSON(inputs.mode == 'environment' && '["none"]' || inputs.mode == 'red' && '["1.19.13"]' || '["1.17.13","1.18.10","1.19.13"]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: helper
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source }}
+          path: subject
+          persist-credentials: false
+      - name: Frozen complete source before tool setup
+        run: |
+          mkdir -p evidence
+          python helper/.github/native-proof.py subject evidence/00-before-setup.json
+          test "$(git -C subject rev-parse HEAD)" = "$SOURCE"
+        env:
+          SOURCE: ${{ inputs.source }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: inputs.mode != 'environment'
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Actual environment and native command exits
+        run: python helper/.github/native-kit.py
+        env:
+          SOURCE: ${{ inputs.source }}
+          MODE: ${{ inputs.mode }}
+          REGRESSION: ${{ inputs.regression }}
+      - name: Final complete source proof
+        if: always()
+        run: python helper/.github/native-proof.py subject evidence/99-job-final.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kit-${{ inputs.mode }}-${{ matrix.go }}
+          path: evidence
+          if-no-files-found: error
